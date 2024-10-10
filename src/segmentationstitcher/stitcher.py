@@ -1,8 +1,14 @@
 """
 Interface for stitching segmentation data from and calculating transformations between adjacent image blocks.
 """
+
+from cmlibs.maths.vectorops import add
 from cmlibs.utils.zinc.general import HierarchicalChangeManager
+from cmlibs.utils.zinc.field import findOrCreateFieldCoordinates, findOrCreateFieldStoredString, findOrCreateFieldGroup
 from cmlibs.zinc.context import Context
+from cmlibs.zinc.field import Field, FieldGroup
+from cmlibs.zinc.element import Element, Elementbasis
+from cmlibs.zinc.node import Node
 from segmentationstitcher.connection import Connection
 from segmentationstitcher.segment import Segment
 from segmentationstitcher.annotation import region_get_annotations
@@ -197,3 +203,144 @@ class Stitcher:
 
     def write_output_segmentation_file(self, file_name):
         pass
+
+    def write_output_vagus_segmentation_file_valerie(self, file_name):
+        """
+        Writes out exf file.
+        At the moment only considers annotation groups from NETWORK_GROUP_1 category (trunk, branch centroid groups)
+        """
+
+        with HierarchicalChangeManager(self._root_region):
+            # region to write all stitched data into
+            stitched_region = self._root_region.createRegion()
+            fieldmodule = stitched_region.getFieldmodule()
+            fieldcache = fieldmodule.createFieldcache()
+            coordinates = findOrCreateFieldCoordinates(fieldmodule).castFiniteElement()
+
+            # nodes settings
+            nodes = fieldmodule.findNodesetByFieldDomainType(Field.DOMAIN_TYPE_NODES)
+            nodetemplate = nodes.createNodetemplate()
+            nodetemplate.defineField(coordinates)
+            nodetemplate.setValueNumberOfVersions(coordinates, -1, Node.VALUE_LABEL_VALUE, 1)
+
+            # elements settings
+            mesh1d = fieldmodule.findMeshByDimension(1)
+            linear_basis = fieldmodule.createElementbasis(1, Elementbasis.FUNCTION_TYPE_LINEAR_LAGRANGE)
+            eft = mesh1d.createElementfieldtemplate(linear_basis)
+            elementtemplate = mesh1d.createElementtemplate()
+            elementtemplate.setElementShapeType(Element.SHAPE_TYPE_LINE)
+            elementtemplate.defineField(coordinates, -1, eft)
+
+            # markers settings
+            datapoints = fieldmodule.findNodesetByFieldDomainType(Field.DOMAIN_TYPE_DATAPOINTS)
+            marker_fieldgroup = findOrCreateFieldGroup(fieldmodule, 'marker')
+            marker_nodesetgroup = marker_fieldgroup.createNodesetGroup(datapoints)
+            marker_names = findOrCreateFieldStoredString(fieldmodule, name="marker_name")
+            dnodetemplate = datapoints.createNodetemplate()
+            dnodetemplate.defineField(coordinates)
+            dnodetemplate.setValueNumberOfVersions(coordinates, -1, Node.VALUE_LABEL_VALUE, 1)
+            dnodetemplate.defineField(marker_names)
+
+            nodeIdentifier = 1
+            elementIdentifier = 1
+            markerNodeIdentifier = 1
+
+            nodes_per_field_group = {}
+            for segment_id, segment in enumerate(self.get_segments()):
+                segment_region = segment.get_raw_region()
+                segment_fieldmodule = segment_region.getFieldmodule()
+                segment_fieldcache = segment_fieldmodule.createFieldcache()
+                segment_coordinates = segment_fieldmodule.findFieldByName("coordinates").castFiniteElement()
+                segment_nodes = segment_fieldmodule.findNodesetByFieldDomainType(Field.DOMAIN_TYPE_NODES)
+
+                # annotations sorting:
+                segment_annotations = region_get_annotations(segment_region, ['vagus', 'nerve', 'trunk', 'branch'], [], [])
+                # network group 1: trunk group, then everything that is 'nerve' or 'branch'
+                # for now ignore other annotation groups
+                trunk_keywords = ['left vagus nerve', 'right vagus nerve',
+                                  'left vagus X nerve trunk', 'right vagus X nerve trunk']
+                trunk_group_name = [annotation.get_name() for annotation in segment_annotations if
+                                    annotation.get_name() in trunk_keywords][0]
+                segment_annotations = [annotation.get_name() for annotation in segment_annotations if
+                                       annotation.get_name() not in ['marker', trunk_group_name]]
+                segment_annotations.sort(reverse=True)
+                segment_annotations.insert(0, trunk_group_name)
+
+                if segment_id > 0:
+                    # group names that need to be stitched & number of elements that needs to be added in between
+                    groups_to_connect = list(set(segment_annotations) & set(nodes_per_field_group.keys()))
+                    print('Common groups:', groups_to_connect)
+
+                node_map = {}  # old node -> new node (within one segment)
+                # nodes & elements
+                for annotation in segment_annotations:
+                    if annotation not in nodes_per_field_group.keys():
+                        # new annotation group
+                        nodes_per_field_group[annotation] = []
+
+                    segment_field_group = findOrCreateFieldGroup(segment_fieldmodule, annotation)
+                    segment_field_nodes = segment_field_group.getNodesetGroup(segment_nodes)
+
+                    field_group = findOrCreateFieldGroup(fieldmodule, annotation)
+                    field_group.setSubelementHandlingMode(FieldGroup.SUBELEMENT_HANDLING_MODE_FULL)
+                    mesh_group = field_group.getOrCreateMeshGroup(mesh1d)
+
+                    segment_node_iter = segment_field_nodes.createNodeiterator()
+                    segment_node = segment_node_iter.next()
+                    while segment_node.isValid():
+                        segment_node_id = segment_node.getIdentifier()
+                        if segment_node_id in node_map.keys():
+                            # node already exist
+                            nodes_per_field_group[annotation].append(node_map[segment_node_id])
+                            segment_node = segment_node_iter.next()
+                            continue
+
+                        segment_fieldcache.setNode(segment_node)
+                        _, xyz = segment_coordinates.getNodeParameters(segment_fieldcache, -1, Node.VALUE_LABEL_VALUE, 1, 3)
+                        xyz = add(xyz, segment.get_translation())  # apply translation to node
+
+                        node = nodes.createNode(nodeIdentifier, nodetemplate)
+                        fieldcache.setNode(node)
+                        coordinates.setNodeParameters(fieldcache, -1, Node.VALUE_LABEL_VALUE, 1, xyz)
+                        if nodeIdentifier > 1:
+                            nids = [nodes_per_field_group[annotation][-1], nodeIdentifier]
+                            element = mesh1d.createElement(elementIdentifier, elementtemplate)
+                            element.setNodesByIdentifier(eft, nids)
+                            mesh_group.addElement(element)
+                            elementIdentifier += 1
+
+                        node_map[segment_node_id] = nodeIdentifier
+                        nodes_per_field_group[annotation].append(nodeIdentifier)
+                        nodeIdentifier += 1
+                        segment_node = segment_node_iter.next()
+
+                # markers
+                segment_markers = segment_fieldmodule.findNodesetByFieldDomainType(Field.DOMAIN_TYPE_DATAPOINTS)
+                segment_marker_name_field = segment_fieldmodule.findFieldByName("marker_name")
+                segment_marker_group = findOrCreateFieldGroup(segment_fieldmodule, 'marker')
+                segment_marker_nodes = segment_marker_group.getNodesetGroup(segment_markers)
+
+                segment_marker_node_iter = segment_marker_nodes.createNodeiterator()
+                segment_marker_node = segment_marker_node_iter.next()
+                while segment_marker_node.isValid():
+                    segment_fieldcache.setNode(segment_marker_node)
+                    _, marker_xyz = segment_coordinates.evaluateReal(segment_fieldcache, 3)
+                    marker_name = segment_marker_name_field.evaluateString(segment_fieldcache)
+                    marker_xyz = add(marker_xyz, segment.get_translation())  # apply translation to marker
+
+                    node = datapoints.createNode(markerNodeIdentifier, dnodetemplate)
+                    fieldcache.setNode(node)
+                    coordinates.setNodeParameters(fieldcache, -1, Node.VALUE_LABEL_VALUE, 1, marker_xyz)
+                    marker_names.assignString(fieldcache, marker_name)
+                    marker_nodesetgroup.addNode(node)
+                    markerNodeIdentifier += 1
+
+                    segment_marker_node = segment_marker_node_iter.next()
+
+            # write all data in one exf file
+            sir = stitched_region.createStreaminformationRegion()
+            srf = sir.createStreamresourceFile(file_name)
+            stitched_region.write(sir)
+
+
+

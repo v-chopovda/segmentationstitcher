@@ -2,7 +2,7 @@ import os
 import unittest
 from segmentationstitcher.annotation import AnnotationCategory
 from segmentationstitcher.stitcher import Stitcher
-from tests.testutils import assertAlmostEqualList
+from testutils import assertAlmostEqualList
 
 here = os.path.abspath(os.path.dirname(__file__))
 
@@ -50,8 +50,16 @@ class StitchVagusTestCase(unittest.TestCase):
         self.assertEqual("unknown", annotation17.get_name())
         self.assertEqual(AnnotationCategory.GENERAL, annotation17.get_category())
 
-        connection = stitcher1.create_connection([segments1[0], segments1[1]])
+        joined_segments = [segments1[0], segments1[1]]
+        connection12 = stitcher1.create_connection(joined_segments)
         connections = stitcher1.get_connections()
+        self.assertEqual(1, len(connections))
+        self.assertEqual(' - '.join([segment.get_name() for segment in joined_segments]), connection12.get_name())
+        self.assertEqual(joined_segments, connection12.get_segments())
+        connection12.set_linked_nodes([11], [1])
+        connection13 = stitcher1.create_connection([segments1[0], segments1[2]])
+        self.assertEqual(2, len(connections))
+        stitcher1.remove_connection(connection13)
         self.assertEqual(1, len(connections))
 
         # test changing category and that category groups are updated
@@ -74,9 +82,15 @@ class StitchVagusTestCase(unittest.TestCase):
         settings = stitcher1.encode_settings()
         self.assertEqual(3, len(settings["segments"]))
         self.assertEqual(7, len(settings["annotations"]))
+        self.assertEqual(1, len(settings["connections"]))
         self.assertEqual(1, settings["version"])
         assertAlmostEqualList(self, new_translation, settings["segments"][1]["translation"], delta=TOL)
         self.assertEqual(AnnotationCategory.EXCLUDE.name, settings["annotations"][6]["category"])
+
+        print(stitcher1.get_annotations())
+        print(settings["segments"])
+        print(settings["annotations"])
+        print(settings["connections"])
 
         stitcher2 = Stitcher(segmentation_file_names, network_group1_keywords, network_group2_keywords)
         stitcher2.decode_settings(settings)
@@ -86,6 +100,13 @@ class StitchVagusTestCase(unittest.TestCase):
         annotations2 = stitcher2.get_annotations()
         annotation27 = annotations2[6]
         self.assertEqual(AnnotationCategory.EXCLUDE, annotation27.get_category())
+        connections2 = stitcher2.get_connections()
+        self.assertEqual(1, len(connections2))
+        connection212 = connections2[0]
+        self.assertEqual(['vagus-segment1', 'vagus-segment2'],
+                         [segment.get_name() for segment in connection212.get_segments()])
+        self.assertEqual(1, len(connection212.get_linked_nodes()))
+
 
 
 if __name__ == "__main__":

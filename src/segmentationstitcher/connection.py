@@ -71,3 +71,17 @@ class Connection:
         :return: List of segments joined by this connection.
         """
         return self._segments
+
+    def get_linked_nodes(self):
+        """
+        :return: List of segments joined by this connection.
+        """
+        return self._linked_nodes
+
+    def set_linked_nodes(self, first_segment_node_ids, second_segment_node_ids):
+
+        assert len(first_segment_node_ids) == len(second_segment_node_ids)
+        linked_nodes = []
+        for ii in range(len(first_segment_node_ids)):
+            linked_nodes.append([first_segment_node_ids[ii], second_segment_node_ids[ii]])
+        self._linked_nodes = linked_nodes
